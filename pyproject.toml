@@ -12,7 +12,7 @@ repository = "https://github.com/adamkarvonen/SAEBench"
 keywords = ["sparse-autoencoders", "mechanistic-interpretability", "PyTorch"]
 classifiers = ["Topic :: Scientific/Engineering :: Artificial Intelligence"]
 
-[tool.poetry.dependencies]
+# [tool.poetry.dependencies]
 # python = "^3.10"
 # sae_lens = "^6.28.0"
 # transformer-lens = ">=2.0.0"
