@@ -240,6 +240,7 @@ def run_evals(
                     random_seed=random_seed,
                     llm_batch_size=llm_batch_size // 4,
                     llm_dtype=llm_dtype,
+                    entity_attribute_selection={"city": ["Country", "Continent", "Language"]},
                 ),
                 selected_saes,
                 device,
