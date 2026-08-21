@@ -1,6 +1,7 @@
 import argparse
 import gc
 import os
+import random
 import statistics
 import time
 from dataclasses import asdict
@@ -42,6 +43,8 @@ def run_eval(
     force_rerun: bool = False,
 ):
     torch.set_grad_enabled(True)
+    random.seed(config.random_seed)
+    torch.manual_seed(config.random_seed)
     """
     selected_saes is a list of either tuples of (sae_lens release, sae_lens id) or (sae_name, SAE object)
     """
