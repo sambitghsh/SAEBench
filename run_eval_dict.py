@@ -465,7 +465,10 @@ def parse_args():
 
 
 def set_deterministic(seed: int) -> None:
-    """Seed every RNG used across the repo and enable CUDA determinism."""
+    """Seed every RNG used across the repo and enable stricter PyTorch determinism."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -473,6 +476,7 @@ def set_deterministic(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 
 if __name__ == "__main__":
