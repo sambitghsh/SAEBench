@@ -1,7 +1,10 @@
 import argparse
 import json
 import os
+import random
+import traceback
 
+import numpy as np
 import torch
 from huggingface_hub import snapshot_download
 from tqdm import tqdm
@@ -32,7 +35,7 @@ MODEL_CONFIGS = {
     "pythia-160m-deduped": {
         "batch_size": 256,
         "dtype": "float32",
-        "layers": [8],
+        "layers": [6],
         "d_model": 768,
     },
     "gemma-2-2b": {
@@ -79,6 +82,16 @@ ALL_EVAL_TYPES = [
     "ravel",
 ]
 
+# sae-probes (used by sparse_probing_sae_probes) doesn't expose a dtype
+# option in its eval config and internally runs the model / caches
+# activations in float32. If the SAE itself is loaded in bfloat16 (e.g.
+# for gemma-2-2b), the resulting matmul between float32 activations and
+# bfloat16 SAE weights fails with a dtype mismatch. Force float32 just for
+# this eval type's SAE loading; every other eval type is unaffected.
+EVAL_TYPE_DTYPE_OVERRIDES = {
+    "sparse_probing_sae_probes": "float32",
+}
+
 
 def get_all_hf_repo_autoencoders(
     repo_id: str, download_location: str = "downloaded_saes"
@@ -94,9 +107,11 @@ def get_all_hf_repo_autoencoders(
     config_locations = []
 
     for root, _, files in os.walk(config_dir):
-        for file in files:
+        for file in sorted(files):
             if file == "config.json":
                 config_locations.append(os.path.join(root, file))
+
+    config_locations.sort()
 
     repo_locations = []
 
@@ -231,6 +246,7 @@ def run_evals(
                 verbose=True,
                 dtype=llm_dtype,
                 device=device,
+                random_seed=random_seed,
             )
         ),
         "ravel": (
@@ -299,6 +315,11 @@ def run_evals(
             )
         ),
         "sparse_probing_sae_probes": (
+            # NOTE: SparseProbingSaeProbesEvalConfig has no dtype/llm_dtype
+            # field (confirmed via dataclasses.fields()), so we do NOT pass
+            # llm_dtype here -- doing so raises a validation error. The
+            # dtype mismatch this eval hits is instead fixed by loading the
+            # SAE itself in float32, see EVAL_TYPE_DTYPE_OVERRIDES below.
             lambda selected_saes, is_final: sparse_probing_sae_probes.run_eval(
                 sparse_probing_sae_probes.SparseProbingSaeProbesEvalConfig(
                     model_name=model_name,
@@ -355,6 +376,10 @@ def run_evals(
 
         print(f"\n\n\nRunning {eval_type} evaluation\n\n\n")
 
+        sae_load_dtype = general_utils.str_to_dtype(
+            EVAL_TYPE_DTYPE_OVERRIDES.get(eval_type, llm_dtype)
+        )
+
         try:
             for i, sae_location in enumerate(sae_locations):
                 is_final = False
@@ -367,21 +392,20 @@ def run_evals(
                     layer=None,
                     model_name=model_name,
                     device=device,
-                    dtype=general_utils.str_to_dtype(llm_dtype),
+                    dtype=sae_load_dtype,
                 )
                 unique_sae_id = sae_location.replace("/", "_")
                 unique_sae_id = f"{repo_id.split('/')[1]}_{unique_sae_id}"
                 selected_saes = [(unique_sae_id, sae)]
 
                 os.makedirs(output_folders[eval_type], exist_ok=True)
-                # import pdb as p
-                # p.set_trace()
                 eval_runners[eval_type](selected_saes, is_final)
 
                 del sae
 
         except Exception as e:
             print(f"Error running {eval_type} evaluation: {e}")
+            traceback.print_exc()
             continue
 
 
@@ -407,7 +431,7 @@ def parse_args():
         "--eval_types",
         nargs="+",
         choices=ALL_EVAL_TYPES,
-        default=["core", "scr", "tpp", "sparse_probing", "sparse_probing_sae_probes", "ravel"],
+        default=["core", "scr", "tpp", "sparse_probing", "sparse_probing_sae_probes", "ravel", "unlearning"],
         help="Which evaluations to run. Space-separated list.",
     )
     parser.add_argument(
@@ -440,12 +464,23 @@ def parse_args():
     return parser.parse_args()
 
 
+def set_deterministic(seed: int) -> None:
+    """Seed every RNG used across the repo and enable CUDA determinism."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 if __name__ == "__main__":
     """
     This will run all evaluations on all selected dictionary_learning SAEs within the specified HuggingFace repos.
     Set repos and eval types via CLI args, e.g.:
 
-        python evaluate_saes.py \
+        python run_eval_dict.py \
             --repo sam01ghsh/experiments_pythia-160m-deduped_matryoshka_batch_top_k_random_subset pythia-160m-deduped \
             --eval_types core scr tpp sparse_probing sparse_probing_sae_probes ravel
 
@@ -454,6 +489,8 @@ if __name__ == "__main__":
     This relies on each SAE being located in a folder which contains an ae.pt file and a config.json file (which is the default save format in dictionary_learning).
     """
     args = parse_args()
+
+    set_deterministic(args.random_seed)
 
     device = general_utils.setup_environment()
 
@@ -523,12 +560,36 @@ if __name__ == "__main__":
 
 # Example usage:
 #
-# python evaluate_saes.py \
+# CUDA_VISIBLE_DEVICES=0 python run_eval_dict.py \
 #   --repo sam01ghsh/experiments_gemma-2-2b_jump_relu_random_subset gemma-2-2b \
 #   --repo sam01ghsh/experiments_gemma-2-2b_matryoshka_batch_top_k_random_subset gemma-2-2b \
 #   --repo sam01ghsh/experiments_gemma-2-2b_batch_top_k_random_subset gemma-2-2b \
-#   --eval_types core scr tpp sparse_probing sparse_probing_sae_probes
-#
+#   --eval_types absorption core scr tpp sparse_probing sparse_probing_sae_probes ravel unlearning
+
+
+# CUDA_VISIBLE_DEVICES=1 python run_eval_dict.py \
+#   --repo sam01ghsh/experiments_gemma-2-2b_jump_relu_baseline gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_jump_relu_random_subset gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_matryoshka_batch_top_k_baseline gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_matryoshka_batch_top_k_random_subset gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_batch_top_k_baseline gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_batch_top_k_random_subset gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_standard_new_random_subset gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_standard_new_baseline gemma-2-2b \
+#   --eval_types autointerp
+
+# CUDA_VISIBLE_DEVICES=2 python run_eval_dict.py \
+#   --repo 'sam01ghsh/experiments_gemma-2-2b_jump_relu_baseline' gemma-2-2b \
+#   --eval_types unlearning
+
+# CUDA_VISIBLE_DEVICES=2 python run_eval_dict.py \
+#   --repo sam01ghsh/experiments_gemma-2-2b_standard_new_random_subset gemma-2-2b \
+#   --repo sam01ghsh/experiments_gemma-2-2b_standard_new_baseline gemma-2-2b \
+#   --eval_types absorption core scr tpp sparse_probing sparse_probing_sae_probes ravel unlearning
+
+
+
+# #
 # python evaluate_saes.py \
 #   --repo sam01ghsh/experiments_gemma-2-2b_matryoshka_batch_top_k_random_subset gemma-2-2b \
 #   --eval_types absorption
@@ -537,3 +598,29 @@ if __name__ == "__main__":
 # python run_eval_dict.py \
 #   --repo sam01ghsh/experiments_gemma-2-2b_matryoshka_batch_top_k_random_subset gemma-2-2b \
 #   --eval_types absorption core scr tpp ravel unlearning
+
+
+# CUDA_VISIBLE_DEVICES=0 python run_eval_dict.py \
+#   --repo madelynmathai/coreset-sweep-saes gemma-2-2b \
+#   --include_keywords "gemma-2-2b" \
+#   --eval_types ravel scr tpp
+
+
+
+# CUDA_VISIBLE_DEVICES=0 python run_eval_dict.py \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_matryoshka_batch_top_k_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_jump_relu_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_batch_top_k_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_standard_new_baseline pythia-160m-deduped \
+#   --eval_types absorption core scr tpp sparse_probing sparse_probing_sae_probes ravel unlearning autointerp
+
+# CUDA_VISIBLE_DEVICES=2 python run_eval_dict.py \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_matryoshka_batch_top_k_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_jump_relu_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_batch_top_k_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_standard_new_baseline pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_matryoshka_batch_top_k_random_subset pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_jump_relu_random_subset pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_batch_top_k_random_subset pythia-160m-deduped \
+#   --repo sam01ghsh/experiments_pythia-160m-deduped_standard_new_random_subset pythia-160m-deduped \
+#   --eval_types absorption core scr tpp sparse_probing sparse_probing_sae_probes ravel unlearning autointerp
