@@ -144,6 +144,7 @@ def run_eval(
     llm_dtype = general_utils.str_to_dtype(config.llm_dtype)
 
     random.seed(config.random_seed)
+    np.random.seed(config.random_seed)
     torch.manual_seed(config.random_seed)
 
     model = HookedTransformer.from_pretrained_no_processing(
