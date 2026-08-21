@@ -6,6 +6,7 @@ import gc
 import logging
 import math
 import os
+import random
 import subprocess
 import time
 from collections import defaultdict
@@ -981,7 +982,10 @@ def multiple_evals(
     dtype: str = "float32",
     device: str = "cuda",
     force_rerun: bool = False,
+    random_seed: int = 42,
 ) -> list[dict[str, Any]]:
+    random.seed(random_seed)
+    torch.manual_seed(random_seed)
     assert len(selected_saes) > 0, "No SAEs to evaluate"
 
     eval_results = []
@@ -1085,7 +1089,7 @@ def multiple_evals(
                 )
 
             activation_store = create_activation_store()
-            activation_store.shuffle_input_dataset(seed=42)
+            activation_store.shuffle_input_dataset(seed=random_seed)
 
             eval_metrics = nested_dict()
             eval_metrics["unique_id"] = f"{sae_release}_{sae_id}"
