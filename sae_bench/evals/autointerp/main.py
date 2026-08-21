@@ -316,16 +316,44 @@ class AutoInterp:
             assert message.keys() == {"content", "role"}
             assert message["role"] in ["system", "user", "assistant"]
 
-        client = OpenAI(api_key=self.api_key)
+        # client = OpenAI(api_key=self.api_key)
+
+        # result = client.chat.completions.create(
+        #     model="gpt-4o-mini",
+        #     messages=messages,  # type: ignore
+        #     n=n_completions,
+        #     max_tokens=max_tokens,
+        #     stream=False,
+        # )
+
+        client = OpenAI(
+        api_key=self.api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
 
         result = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gemini-3.6-flash",
             messages=messages,  # type: ignore
-            n=n_completions,
-            max_tokens=max_tokens,
+            n=1,
+            max_tokens=max(max_tokens, 256),
+            reasoning_effort="minimal",
             stream=False,
         )
-        response = [choice.message.content.strip() for choice in result.choices]
+
+        # from pdb import set_trace as stack
+        # stack()
+        #print(response)
+        # response = [choice.message.content.strip() for choice in result.choices]
+        response = [
+            choice.message.content.strip()
+            for choice in result.choices
+            if choice.message.content is not None
+        ]
+
+        # from pdb import set_trace as stack
+        # stack()
+        # print(response)
+
 
         logs = tabulate(
             [
