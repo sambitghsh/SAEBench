@@ -166,6 +166,7 @@ def run_eval(
     output_path: str,
     force_rerun: bool = False,
 ) -> dict[str, float]:
+    _set_random_seed(config.random_seed)
     results: dict[str, float] = {}
     os.makedirs(output_path, exist_ok=True)
 
